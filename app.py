@@ -1,223 +1,161 @@
 # app.py
 import streamlit as st
-import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import IsolationForest
-from statsmodels.tsa.seasonal import seasonal_decompose
-import pmdarima as pm
-import io
-import base64
-import torch
-import torch.nn as nn
-import plotly.express as px
+import pandas as pd
 
-st.set_page_config(layout="wide", page_title="DeepForecast — Upload CSV, Forecast, Analyze")
+# -----------------------------
+# 1. TinyDL Models Definitions
+# -----------------------------
 
-st.title("DeepForecast — Upload CSV, Forecast & Trend Analysis (Streamlit Free Ready)")
-st.markdown(
-    "Upload a CSV with a datetime column and one or more numeric columns. "
-    "The app offers Auto-ARIMA (fast & robust) and a compact PyTorch LSTM "
-    "(deep learning) option optimized for Streamlit free tier." 
-)
+# Activation functions
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
-# ----------------------------- Helpers -----------------------------
-@st.cache_data
-def read_csv(file) -> pd.DataFrame:
-    return pd.read_csv(file)
+def relu(x):
+    return np.maximum(0, x)
 
-def detect_datetime_columns(df):
-    candidates = []
-    for c in df.columns:
-        try:
-            parsed = pd.to_datetime(df[c])
-            if parsed.notna().mean() > 0.8:
-                candidates.append(c)
-        except Exception:
-            continue
-    return candidates
+def tanh(x):
+    return np.tanh(x)
 
-def prepare_series(df, date_col, value_col, freq=None):
-    s = df[[date_col, value_col]].copy()
-    s[date_col] = pd.to_datetime(s[date_col])
-    s = s.sort_values(date_col).dropna()
-    s = s.set_index(date_col).asfreq(freq)
-    return s[value_col]
-
-def detect_m(index):
-    if hasattr(index, 'freq') and index.freq is not None:
-        freqstr = index.freqstr
-        if 'D' in freqstr: return 7
-        if 'M' in freqstr: return 12
-        if 'H' in freqstr: return 24
-    diffs = np.diff(index.astype(np.int64) // 10**9)
-    if len(diffs) == 0: return 1
-    median = np.median(diffs)
-    if median <= 3600: return 24
-    if median <= 86400: return 7
-    return 12
-
-def train_auto_arima(series, n_periods):
-    model = pm.auto_arima(series, seasonal=True, m=detect_m(series.index), stepwise=True,
-                          error_action='ignore', suppress_warnings=True)
-    fc, confint = model.predict(n_periods=n_periods, return_conf_int=True)
-    idx = pd.date_range(series.index[-1], periods=n_periods+1, closed='right', freq=series.index.freq)
-    pred = pd.Series(fc, index=idx)
-    lower = pd.Series(confint[:, 0], index=idx)
-    upper = pd.Series(confint[:, 1], index=idx)
-    return pred, lower, upper, model
-
-# ----------------------------- PyTorch LSTM -----------------------------
-class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=32, num_layers=1, output_size=1):
-        super(LSTMModel, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
+# 1) TinyNN (1 hidden layer)
+class TinyNN:
+    def __init__(self, input_size, hidden_size=5, output_size=1):
+        self.W1 = np.random.randn(input_size, hidden_size) * 0.1
+        self.b1 = np.zeros(hidden_size)
+        self.W2 = np.random.randn(hidden_size, output_size) * 0.1
+        self.b2 = np.zeros(output_size)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
+        h = relu(np.dot(x, self.W1) + self.b1)
+        out = np.dot(h, self.W2) + self.b2
         return out
 
-def train_lstm(series, n_periods, lookback=24, epochs=50, lr=0.01):
-    arr = series.values.reshape(-1,1)
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(arr)
+# 2) MicroMLP (2 hidden layers)
+class MicroMLP:
+    def __init__(self, input_size, h1=5, h2=3, output_size=1):
+        self.W1 = np.random.randn(input_size, h1)*0.1
+        self.b1 = np.zeros(h1)
+        self.W2 = np.random.randn(h1, h2)*0.1
+        self.b2 = np.zeros(h2)
+        self.W3 = np.random.randn(h2, output_size)*0.1
+        self.b3 = np.zeros(output_size)
 
-    X, y = [], []
-    for i in range(lookback, len(scaled)):
-        X.append(scaled[i-lookback:i, 0])
-        y.append(scaled[i, 0])
-    X = np.array(X); y = np.array(y)
+    def forward(self, x):
+        h1 = relu(np.dot(x, self.W1) + self.b1)
+        h2 = relu(np.dot(h1, self.W2) + self.b2)
+        out = np.dot(h2, self.W3) + self.b3
+        return out
 
-    if len(X) < 10:
-        raise ValueError("Not enough data for LSTM. Choose a smaller lookback or use ARIMA.")
+# 3) MiniCNN (1D convolution)
+class MiniCNN:
+    def __init__(self, input_size, filter_size=3, num_filters=2, output_size=1):
+        self.filters = np.random.randn(num_filters, filter_size)*0.1
+        self.W_out = np.random.randn(num_filters*(input_size-filter_size+1), output_size)*0.1
+        self.b_out = np.zeros(output_size)
 
-    X_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(-1)
-    y_tensor = torch.tensor(y, dtype=torch.float32).unsqueeze(-1)
+    def conv1d(self, x, f):
+        return np.array([np.sum(x[i:i+len(f)]*f) for i in range(len(x)-len(f)+1)])
 
-    model = LSTMModel()
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    def forward(self, x):
+        conv_outputs = [relu(self.conv1d(x, f)) for f in self.filters]
+        conv_concat = np.concatenate(conv_outputs)
+        out = np.dot(conv_concat, self.W_out) + self.b_out
+        return out
 
-    for epoch in range(epochs):
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(X_tensor)
-        loss = criterion(outputs, y_tensor)
-        loss.backward()
-        optimizer.step()
+# 4) Perceptron (single layer)
+class Perceptron:
+    def __init__(self, input_size, output_size=1):
+        self.W = np.random.randn(input_size, output_size)*0.1
+        self.b = np.zeros(output_size)
 
-    last_window = scaled[-lookback:].reshape(1, lookback, 1)
-    preds = []
-    for _ in range(n_periods):
-        inp = torch.tensor(last_window, dtype=torch.float32)
-        pred = model(inp).item()
-        preds.append(pred)
-        last_window = np.append(last_window[:,1:,:], [[[pred]]], axis=1)
+    def forward(self, x):
+        out = sigmoid(np.dot(x, self.W) + self.b)
+        return out
 
-    inv_preds = scaler.inverse_transform(np.array(preds).reshape(-1,1)).ravel()
-    idx = pd.date_range(series.index[-1], periods=n_periods+1, freq=series.index.freq, closed='right')
-    return pd.Series(inv_preds, index=idx), model
+# 5) MiniRNN (vanilla, small)
+class MiniRNN:
+    def __init__(self, input_size, hidden_size=5, output_size=1):
+        self.Wx = np.random.randn(input_size, hidden_size)*0.1
+        self.Wh = np.random.randn(hidden_size, hidden_size)*0.1
+        self.bh = np.zeros(hidden_size)
+        self.Wy = np.random.randn(hidden_size, output_size)*0.1
+        self.by = np.zeros(output_size)
 
-# ----------------------------- Analysis Helpers -----------------------------
-def seasonal_decompose_plot(series):
-    try:
-        return seasonal_decompose(series.dropna(), model='additive', period=detect_m(series.index))
-    except Exception:
-        return None
+    def forward(self, x_seq):
+        h = np.zeros(self.Wh.shape[0])
+        for x in x_seq:
+            h = np.tanh(np.dot(x, self.Wx) + np.dot(h, self.Wh) + self.bh)
+        out = np.dot(h, self.Wy) + self.by
+        return out
 
-def detect_anomalies(series):
-    iso = IsolationForest(contamination=0.02, random_state=42)
-    df = series.fillna(method='ffill').values.reshape(-1,1)
-    iso.fit(df)
-    is_anom = iso.predict(df) == -1
-    return pd.Series(is_anom, index=series.index)
+# 6) MiniAutoencoder
+class MiniAutoencoder:
+    def __init__(self, input_size, encoding_size=3):
+        self.W_enc = np.random.randn(input_size, encoding_size)*0.1
+        self.b_enc = np.zeros(encoding_size)
+        self.W_dec = np.random.randn(encoding_size, input_size)*0.1
+        self.b_dec = np.zeros(input_size)
 
-def df_to_download(df, filename="predictions.csv"):
-    towrite = io.StringIO()
-    df.to_csv(towrite, index=True)
-    b64 = base64.b64encode(towrite.getvalue().encode()).decode()
-    href = f'<a href=\"data:file/csv;base64,{b64}\" download=\"{filename}\">Download CSV</a>'
-    return href
+    def forward(self, x):
+        encoded = relu(np.dot(x, self.W_enc) + self.b_enc)
+        decoded = np.dot(encoded, self.W_dec) + self.b_dec
+        return decoded
 
-# ----------------------------- UI -----------------------------
-uploaded = st.file_uploader("Upload CSV", type=['csv'])
+# -----------------------------
+# 2. Streamlit Interface
+# -----------------------------
+st.title("Tiny Deep Learning Models Comparison")
 
-if uploaded is not None:
-    df = read_csv(uploaded)
-    st.sidebar.header("File preview & options")
-    st.sidebar.dataframe(df.head())
+uploaded_file = st.file_uploader("Upload CSV file", type="csv")
 
-    dt_cols = detect_datetime_columns(df)
-    st.sidebar.markdown("**Detected datetime-like columns**")
-    st.sidebar.write(dt_cols)
+if uploaded_file is not None:
+    df = pd.read_csv(uploaded_file)
+    st.write("Uploaded CSV preview:")
+    st.dataframe(df.head())
 
-    date_col = st.sidebar.selectbox("Choose datetime column", options=([None] + dt_cols))
-    if date_col is None:
-        date_col = st.sidebar.selectbox("Or pick any column that has dates (raw)", options=df.columns)
-
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    value_col = st.sidebar.selectbox("Choose value/target column to forecast", options=numeric_cols)
-
-    freq = st.sidebar.selectbox("Choose frequency (leave None to infer)", options=[None,'D','H','M'])
-    n_periods = st.sidebar.number_input("Forecast periods (steps)", min_value=1, max_value=365, value=30)
-    model_choice = st.sidebar.selectbox("Model", options=['Auto-ARIMA (fast)','LSTM (deep)'])
-    lookback = st.sidebar.slider("LSTM lookback (timesteps)", min_value=3, max_value=120, value=24)
-
-    try:
-        series = prepare_series(df, date_col, value_col, freq=freq)
-    except Exception as e:
-        st.error(f"Failed to parse series: {e}")
-        st.stop()
-
-    st.subheader("Time series preview")
-    st.line_chart(series)
-
-    st.subheader("Decomposition & Anomalies")
-    dec = seasonal_decompose_plot(series)
-    if dec is not None:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.line_chart(pd.DataFrame({'observed':dec.observed, 'trend':dec.trend}))
-        with col2:
-            st.line_chart(pd.DataFrame({'seasonal':dec.seasonal, 'resid':dec.resid}))
+    # Use numeric columns only
+    numeric_data = df.select_dtypes(include=np.number).values
+    if numeric_data.shape[0] == 0:
+        st.error("No numeric data found in CSV!")
     else:
-        st.info("Could not decompose series with chosen frequency.")
+        st.write(f"Using numeric data with shape: {numeric_data.shape}")
 
-    anom = detect_anomalies(series)
-    if anom.any():
-        st.write("Detected anomalies (red) on the chart below")
-        fig = px.line(series.reset_index(), x=series.index.name, y=value_col)
-        fig.add_scatter(x=series.index[anom].to_list(), y=series[anom].to_list(), mode='markers')
-        st.plotly_chart(fig)
+        # -----------------------------
+        # 3. Initialize Models
+        # -----------------------------
+        input_size = numeric_data.shape[1]
+        tinynn = TinyNN(input_size)
+        micromlp = MicroMLP(input_size)
+        minicnn = MiniCNN(input_size)
+        perceptron = Perceptron(input_size)
+        minirnn = MiniRNN(input_size)
+        minaec = MiniAutoencoder(input_size)
 
-    if st.button("Train & Forecast"):
-        with st.spinner("Training / forecasting — this runs in your Streamlit session"):
-            if model_choice == 'Auto-ARIMA (fast)':
-                try:
-                    pred, lower, upper, m = train_auto_arima(series, n_periods)
-                    st.success("Auto-ARIMA finished")
-                    df_pred = pd.DataFrame({'forecast':pred, 'lower':lower, 'upper':upper})
-                    st.line_chart(pd.concat([series, df_pred['forecast']], axis=0))
-                    st.write(df_pred.head())
-                    st.markdown(df_to_download(df_pred, filename='auto_arima_forecast.csv'), unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"ARIMA failed: {e}")
-            else:
-                try:
-                    pred, model = train_lstm(series, n_periods, lookback=lookback, epochs=30)
-                    st.success("LSTM finished")
-                    df_pred = pd.DataFrame({'forecast':pred})
-                    st.line_chart(pd.concat([series, df_pred['forecast']], axis=0))
-                    st.write(df_pred.head())
-                    st.markdown(df_to_download(df_pred, filename='lstm_forecast.csv'), unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"LSTM failed: {e}")
+        # -----------------------------
+        # 4. Run Models
+        # -----------------------------
+        results = {}
+        for i, x in enumerate(numeric_data):
+            results.setdefault("TinyNN", []).append(tinynn.forward(x))
+            results.setdefault("MicroMLP", []).append(micromlp.forward(x))
+            results.setdefault("MiniCNN", []).append(minicnn.forward(x))
+            results.setdefault("Perceptron", []).append(perceptron.forward(x))
+            results.setdefault("MiniRNN", []).append(minirnn.forward(x))
+            results.setdefault("MiniAutoencoder", []).append(minaec.forward(x))
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**Tips**:\n- Use `M` for monthly, `H` for hourly.\n- Auto-ARIMA is faster; LSTM can model nonlinear patterns.")
+        # Convert to arrays
+        for k in results:
+            results[k] = np.array(results[k])
 
-else:
-    st.info("Upload a CSV to get started. Demo CSVs are included in this repo.")
+        st.subheader("Predictions of Each Model (first 5 rows)")
+        for k in results:
+            st.write(f"**{k}**")
+            st.write(results[k][:5])
+
+        # -----------------------------
+        # 5. Comparison Table
+        # -----------------------------
+        st.subheader("Comparison Table (Mean of Outputs)")
+        comparison = {k: np.mean(results[k]) for k in results}
+        comparison_df = pd.DataFrame.from_dict(comparison, orient="index", columns=["Mean_Output"])
+        st.dataframe(comparison_df)
