@@ -1,6 +1,13 @@
+# requirements.txt
+streamlit
+pandas>=1.3
+numpy
+```python
+# app.py
 import streamlit as st
 import numpy as np
 import pandas as pd
+import io
 
 # -----------------------------
 # 1. TinyDL Models Definitions
@@ -105,11 +112,45 @@ class MiniAutoencoder:
 # -----------------------------
 st.title("Tiny Deep Learning Models Comparison")
 
-uploaded_file = st.file_uploader("Upload CSV file", type="csv")
+# Use a selectbox to choose between demo CSVs and uploading a new one
+csv_options = ["energy_hourly.csv", "sales_monthly.csv", "stock_daily.csv", "Upload your own CSV"]
+selected_option = st.selectbox("Select a demo CSV or upload your own:", csv_options)
 
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    st.write("Uploaded CSV preview:")
+df = None
+if selected_option == "Upload your own CSV":
+    uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
+    if uploaded_file is not None:
+        df = pd.read_csv(uploaded_file)
+else:
+    # Read the demo CSV files
+    # Note: In a real-world scenario, you'd have to provide these files in the
+    # same directory as the app.py file
+    if selected_option == "energy_hourly.csv":
+        data = """
+datetime,consumption
+2021-01-01 00:00:00,102
+2021-01-01 01:00:00,98
+2021-01-01 02:00:00,95
+"""
+    elif selected_option == "sales_monthly.csv":
+        data = """
+month,sales
+1,150
+2,165
+3,180
+"""
+    elif selected_option == "stock_daily.csv":
+        data = """
+date,price,volume
+2023-01-01,150,1000
+2023-01-02,152,1100
+2023-01-03,151,1050
+"""
+    df = pd.read_csv(io.StringIO(data))
+
+
+if df is not None:
+    st.write(f"Using {selected_option} data:")
     st.dataframe(df.head())
 
     # Use numeric columns only
