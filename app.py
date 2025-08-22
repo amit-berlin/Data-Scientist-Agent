@@ -1,3 +1,8 @@
+# requirements.txt
+streamlit
+pandas>=1.3
+numpy
+```python
 # app.py
 import streamlit as st
 import numpy as np
