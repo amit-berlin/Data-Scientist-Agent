@@ -1,195 +1,142 @@
+
 import streamlit as st
 import numpy as np
 import pandas as pd
-import io
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.svm import SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.preprocessing import LabelEncoder
+
+# Set a random seed for reproducibility
+np.random.seed(42)
 
 # -----------------------------
-# 1. TinyDL Models Definitions
+# 1. Core AutoML Functions
 # -----------------------------
 
-# Activation functions
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+def detect_task_type(target_series):
+    """Detects if the task is classification or regression."""
+    # Heuristic: if the number of unique values is low and the data type is integer or object,
+    # it's likely a classification problem.
+    if target_series.dtype == 'object' or target_series.nunique() < len(target_series) * 0.1:
+        return 'Classification'
+    else:
+        return 'Regression'
 
-def relu(x):
-    return np.maximum(0, x)
+def train_and_evaluate_models(X, y, task_type):
+    """
+    Trains and evaluates a set of models based on the task type.
+    Returns a dictionary of model performances.
+    """
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-def tanh(x):
-    return np.tanh(x)
+    # Dictionary to store performance results
+    results = {}
 
-# 1) TinyNN (1 hidden layer)
-class TinyNN:
-    def __init__(self, input_size, hidden_size=5, output_size=1):
-        self.W1 = np.random.randn(input_size, hidden_size) * 0.1
-        self.b1 = np.zeros(hidden_size)
-        self.W2 = np.random.randn(hidden_size, output_size) * 0.1
-        self.b2 = np.zeros(output_size)
+    if task_type == 'Classification':
+        # Define classification models to test
+        models = {
+            "Logistic Regression": LogisticRegression(max_iter=1000, solver='liblinear'),
+            "Decision Tree": DecisionTreeClassifier(),
+            "Random Forest": RandomForestClassifier()
+        }
+        
+        for name, model in models.items():
+            try:
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                accuracy = accuracy_score(y_test, y_pred)
+                results[name] = {"Accuracy": accuracy}
+            except Exception as e:
+                results[name] = {"Error": str(e)}
 
-    def forward(self, x):
-        h = relu(np.dot(x, self.W1) + self.b1)
-        out = np.dot(h, self.W2) + self.b2
-        return out
+    elif task_type == 'Regression':
+        # Define regression models to test
+        models = {
+            "Linear Regression": LinearRegression(),
+            "Decision Tree": DecisionTreeRegressor(),
+            "Random Forest": RandomForestRegressor()
+        }
 
-# 2) MicroMLP (2 hidden layers)
-class MicroMLP:
-    def __init__(self, input_size, h1=5, h2=3, output_size=1):
-        self.W1 = np.random.randn(input_size, h1)*0.1
-        self.b1 = np.zeros(h1)
-        self.W2 = np.random.randn(h1, h2)*0.1
-        self.b2 = np.zeros(h2)
-        self.W3 = np.random.randn(h2, output_size)*0.1
-        self.b3 = np.zeros(output_size)
+        for name, model in models.items():
+            try:
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                r2 = r2_score(y_test, y_pred)
+                rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                results[name] = {"R-squared": r2, "RMSE": rmse}
+            except Exception as e:
+                results[name] = {"Error": str(e)}
 
-    def forward(self, x):
-        h1 = relu(np.dot(x, self.W1) + self.b1)
-        h2 = relu(np.dot(h1, self.W2) + self.b2)
-        out = np.dot(h2, self.W3) + self.b3
-        return out
-
-# 3) MiniCNN (1D convolution)
-class MiniCNN:
-    def __init__(self, input_size, filter_size=3, num_filters=2, output_size=1):
-        self.filters = np.random.randn(num_filters, filter_size)*0.1
-        self.W_out = np.random.randn(num_filters*(input_size-filter_size+1), output_size)*0.1
-        self.b_out = np.zeros(output_size)
-
-    def conv1d(self, x, f):
-        return np.array([np.sum(x[i:i+len(f)]*f) for i in range(len(x)-len(f)+1)])
-
-    def forward(self, x):
-        conv_outputs = [relu(self.conv1d(x, f)) for f in self.filters]
-        conv_concat = np.concatenate(conv_outputs)
-        out = np.dot(conv_concat, self.W_out) + self.b_out
-        return out
-
-# 4) Perceptron (single layer)
-class Perceptron:
-    def __init__(self, input_size, output_size=1):
-        self.W = np.random.randn(input_size, output_size)*0.1
-        self.b = np.zeros(output_size)
-
-    def forward(self, x):
-        out = sigmoid(np.dot(x, self.W) + self.b)
-        return out
-
-# 5) MiniRNN (vanilla, small)
-class MiniRNN:
-    def __init__(self, input_size, hidden_size=5, output_size=1):
-        self.Wx = np.random.randn(input_size, hidden_size)*0.1
-        self.Wh = np.random.randn(hidden_size, hidden_size)*0.1
-        self.bh = np.zeros(hidden_size)
-        self.Wy = np.random.randn(hidden_size, output_size)*0.1
-        self.by = np.zeros(output_size)
-
-    def forward(self, x_seq):
-        h = np.zeros(self.Wh.shape[0])
-        for x in x_seq:
-            h = np.tanh(np.dot(x, self.Wx) + np.dot(h, self.Wh) + self.bh)
-        out = np.dot(h, self.Wy) + self.by
-        return out
-
-# 6) MiniAutoencoder
-class MiniAutoencoder:
-    def __init__(self, input_size, encoding_size=3):
-        self.W_enc = np.random.randn(input_size, encoding_size)*0.1
-        self.b_enc = np.zeros(encoding_size)
-        self.W_dec = np.random.randn(encoding_size, input_size)*0.1
-        self.b_dec = np.zeros(input_size)
-
-    def forward(self, x):
-        encoded = relu(np.dot(x, self.W_enc) + self.b_enc)
-        decoded = np.dot(encoded, self.W_dec) + self.b_dec
-        return decoded
+    return results
 
 # -----------------------------
 # 2. Streamlit Interface
 # -----------------------------
-st.title("Tiny Deep Learning Models Comparison")
 
-# Use a selectbox to choose between demo CSVs and uploading a new one
-csv_options = ["energy_hourly.csv", "sales_monthly.csv", "stock_daily.csv", "Upload your own CSV"]
-selected_option = st.selectbox("Select a demo CSV or upload your own:", csv_options)
+st.title("Automated Machine Learning Model Selector")
+st.markdown("Upload a CSV, select a target column, and let the app automatically train and compare different models.")
 
-df = None
-if selected_option == "Upload your own CSV":
-    uploaded_file = st.file_uploader("Upload a CSV file", type="csv")
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-else:
-    # Read the demo CSV files
-    # Note: In a real-world scenario, you'd have to provide these files in the
-    # same directory as the app.py file
-    if selected_option == "energy_hourly.csv":
-        data = """
-datetime,consumption
-2021-01-01 00:00:00,102
-2021-01-01 01:00:00,98
-2021-01-01 02:00:00,95
-"""
-    elif selected_option == "sales_monthly.csv":
-        data = """
-month,sales
-1,150
-2,165
-3,180
-"""
-    elif selected_option == "stock_daily.csv":
-        data = """
-date,price,volume
-2023-01-01,150,1000
-2023-01-02,152,1100
-2023-01-03,151,1050
-"""
-    df = pd.read_csv(io.StringIO(data))
+uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
-
-if df is not None:
-    st.write(f"Using {selected_option} data:")
+if uploaded_file is not None:
+    # Read the CSV file into a pandas DataFrame
+    df = pd.read_csv(uploaded_file)
+    st.write("Data Preview:")
     st.dataframe(df.head())
 
-    # Use numeric columns only
-    numeric_data = df.select_dtypes(include=np.number).values
-    if numeric_data.shape[0] == 0:
-        st.error("No numeric data found in CSV!")
-    else:
-        st.write(f"Using numeric data with shape: {numeric_data.shape}")
+    # Get a list of column names for the selectbox
+    columns = df.columns.tolist()
 
-        # -----------------------------
-        # 3. Initialize Models
-        # -----------------------------
-        input_size = numeric_data.shape[1]
-        tinynn = TinyNN(input_size)
-        micromlp = MicroMLP(input_size)
-        minicnn = MiniCNN(input_size)
-        perceptron = Perceptron(input_size)
-        minirnn = MiniRNN(input_size)
-        minaec = MiniAutoencoder(input_size)
+    # User selects the target variable
+    target_column = st.selectbox("Select the target variable (column to predict):", columns)
 
-        # -----------------------------
-        # 4. Run Models
-        # -----------------------------
-        results = {}
-        for i, x in enumerate(numeric_data):
-            results.setdefault("TinyNN", []).append(tinynn.forward(x))
-            results.setdefault("MicroMLP", []).append(micromlp.forward(x))
-            results.setdefault("MiniCNN", []).append(minicnn.forward(x))
-            results.setdefault("Perceptron", []).append(perceptron.forward(x))
-            results.setdefault("MiniRNN", []).append(minirnn.forward(x))
-            results.setdefault("MiniAutoencoder", []).append(minaec.forward(x))
+    if st.button("Run AutoML"):
+        if target_column:
+            st.write(f"Running AutoML for target variable: **{target_column}**...")
 
-        # Convert to arrays
-        for k in results:
-            results[k] = np.array(results[k])
+            # Separate features (X) and target (y)
+            y = df[target_column]
+            X = df.drop(columns=[target_column])
 
-        st.subheader("Predictions of Each Model (first 5 rows)")
-        for k in results:
-            st.write(f"**{k}**")
-            st.write(results[k][:5])
+            # Handle non-numeric features by one-hot encoding
+            X = pd.get_dummies(X, drop_first=True)
 
-        # -----------------------------
-        # 5. Comparison Table
-        # -----------------------------
-        st.subheader("Comparison Table (Mean of Outputs)")
-        comparison = {k: np.mean(results[k]) for k in results}
-        comparison_df = pd.DataFrame.from_dict(comparison, orient="index", columns=["Mean_Output"])
-        st.dataframe(comparison_df)
+            # Handle string targets in classification
+            if y.dtype == 'object':
+                le = LabelEncoder()
+                y = le.fit_transform(y)
+            
+            # Detect task type
+            task_type = detect_task_type(y)
+            st.success(f"Task detected: **{task_type}**")
+
+            # Train and evaluate models
+            with st.spinner('Training and evaluating models...'):
+                results = train_and_evaluate_models(X, y, task_type)
+
+            # Display results
+            st.subheader("Model Performance Results")
+            if task_type == 'Classification':
+                results_df = pd.DataFrame(results).T.sort_values(by="Accuracy", ascending=False)
+                st.dataframe(results_df)
+                st.markdown("---")
+                st.subheader("Best Model (by Accuracy)")
+                best_model = results_df.index[0]
+                best_score = results_df.iloc[0]["Accuracy"]
+                st.success(f"The best model is **{best_model}** with an accuracy of **{best_score:.2f}**.")
+            
+            elif task_type == 'Regression':
+                results_df = pd.DataFrame(results).T.sort_values(by="R-squared", ascending=False)
+                st.dataframe(results_df)
+                st.markdown("---")
+                st.subheader("Best Model (by R-squared)")
+                best_model = results_df.index[0]
+                best_score = results_df.iloc[0]["R-squared"]
+                st.success(f"The best model is **{best_model}** with an R-squared of **{best_score:.2f}**.")
+        else:
+            st.error("Please select a target variable to run the AutoML process.")
+
